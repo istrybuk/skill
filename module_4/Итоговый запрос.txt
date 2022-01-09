@@ -1,0 +1,117 @@
+WITH Main AS -- Таблица с рейсами, вылетевшими из Анапы зимой 2016 - 2017 года
+
+  (SELECT *
+   FROM dst_project.flights
+   WHERE departure_airport = 'AAQ' -- аэропорт отправления
+
+     AND (date_trunc('month', scheduled_departure) IN ('2017-01-01',
+                                                       '2017-02-01',
+                                                       '2016-12-01'))-- выбранные месяцы
+
+     AND status NOT IN ('Cancelled') -- кроме статуса Отменены
+ ), b AS -- Таблица, считающая количество купленных билетов на все рейсы и их стоимость в разбивке по классам обслуживания
+
+  (SELECT Main.flight_id, -- Идентификатор рейса
+ f.fare_conditions, -- Класс обслуживания
+ count(f.ticket_no) AS people_count, -- количество билетов
+ sum(f.amount) AS income -- Стоимость перелета
+ 
+   FROM Main
+   LEFT JOIN dst_project.ticket_flights AS f -- соединям таб. рейсов (Mian) с таб. полетов (f)
+ ON Main.flight_id = f.flight_id -- по ключу (Идентификатор рейса)
+ 
+   GROUP BY 1,2 -- группируем по ключу и классу
+   ORDER BY 1 -- сорт. по ключу
+ ), economy AS -- Таблица с количеством и суммарной стоимостью билетов эконом-класса для каждого рейса
+
+  (SELECT b.flight_id, -- ключь
+ b.people_count AS economy_count, -- класс обслуживания
+ b.income AS economy_income -- Стоимость перелета
+
+   FROM b
+   WHERE b.fare_conditions = 'Economy' ), business AS -- Таблица с количеством и суммарной стоимостью билетов бизнесс-класса для каждого рейса
+
+  (SELECT b.flight_id, -- ключь
+ b.people_count AS business_count, -- класс обслуживания
+ b.income AS business_income -- Стоимость перелета
+
+   FROM b
+   WHERE b.fare_conditions = 'Business' ), Main_count AS -- объединение таблиц с вылетами и количеством билетов разного класса
+
+  (SELECT -- Перераспределим столбцы начальной таблицы для лучшей читаемости информации
+ -- Main.status, -- удалим столбец status, по данным 193 самолета с одинаковым статусом (Arrived).
+ Main.flight_id,
+ Main.flight_no,
+ Main.aircraft_code,
+ Main.departure_airport,
+ Main.arrival_airport,
+ Main.scheduled_departure,
+ Main.actual_departure,
+ Main.scheduled_arrival,
+ Main.actual_arrival, -- Добавляем столбцы с новой информацией
+ EXTRACT (EPOCH
+          FROM (Main.actual_arrival - Main.actual_departure)) / 60 / 60 AS flight_time, -- время полёта в часах
+ economy.economy_count, -- количество проданных билетов эконом-класса на рейс
+ economy.economy_income, -- суммарная стоимость проданных билетов эконом-класса на рейс
+ business.business_count, -- количество проданных билетов бизнес-класса на рейс
+ business.business_income, -- суммарная стоимость проданных билетов бизнес-класса на рейс
+ economy.economy_count + business.business_count AS total_count, -- суммарное количество проданных билетов на рейс
+ economy.economy_income + business.business_income AS total_income -- суммарная стоимость проданных билетов на рейс
+
+   FROM Main
+   LEFT JOIN economy ON Main.flight_id = economy.flight_id
+   LEFT JOIN business ON Main.flight_id = business.flight_id), fuel AS -- Таблица с расчётом расхода топлива для каждого рейса
+ /*
+         В данной таблице используются следующие данные, полученные из интернета:
+
+--          https://favt.gov.ru/dejatelnost-ajeroporty-i-ajerodromy-ceny-na-aviagsm/
+
+--          Стоимость авиационного топлива в Анапе в декабрь 2016 года (без НДС) - 38867 рублей за тонну
+--          Стоимость авиационного топлива в Анапе в январе 2017 года (без НДС) - 41435 рублей за тонну
+--          Стоимость авиационного топлива в Анапе в феврале 2017 года (без НДС) - 39553 рубля за тонну
+
+--          Расход авиационного топлива для самолёта Boeing 737-300 - 25.5 грамм на пассажиро-километр
+--          Расход авиационного топлива для самолёта Sukhoi Superjet-100 - 23.5 грамм на пассажиро-километр
+--          Эти данные нуждаются в уточнении у специалистов, так же как и грамотная методика расчёта.
+--          В интернете ведутся яростные споры на эту тему. Эта методика выбрана из-за того, что учитывает
+--          количество пассажиров на борту.
+
+--          Расстояние от аэропорта Анапы до аэропорта EGO(Белгород) - 638
+--          Расстояние от аэропорта Анапы до аэропорта SVO(Москва) - 1221
+--          Расстояние от аэропорта Анапы до аэропорта NOZ(Новокузнецк) - 3658
+--          Расстояние посчитано в онлайн-калькуляторе на специализированном сайте.
+
+--          Не осуществлялся расчёт по координатам из-за того, что здесь не принципиальна такая точность.
+
+--          Далее в фильтрах используется то, что Sukhoi Superjet-100 летает только в Белгород,
+--          а Boeing 737-300 только в Москву и Новокузнецк
+     */
+  (SELECT M.flight_id,
+             coalesce(
+             max(38867) filter (where date_part('month', M.actual_departure) = 12),
+             max(41435) filter (where date_part('month', M.actual_departure) = 1),
+             max(39553) filter (where date_part('month', M.actual_departure) = 2)
+             ) as fuel_price,
+             coalesce(
+             max((M.total_count * 23.5 * 638) / 1000000) filter (where M.arrival_airport = 'EGO'),
+             max((M.total_count * 25.5 * 1221) / 1000000) filter (where M.arrival_airport = 'SVO'),
+             max((M.total_count * 25.5 * 3658) / 1000000) filter (where M.arrival_airport = 'NOZ')
+             ) AS fuel_consumption
+   FROM Main_count AS M
+   GROUP BY 1 )
+ /*
+  Итоговая таблица, содержащая исходные данные о рейсах из Анапы,
+  количество проданных билетов разного класса, их стоимость, расход
+  топлива для каждого рейса, затраты на топливо и суммарный доход
+  каждого рейса: Стоимость билетов - стоимость топлива
+*/
+SELECT Main_count.*,
+       fuel.fuel_consumption, -- потраченное топливо на рейс в тоннах
+ fuel.fuel_price * fuel.fuel_consumption AS fuel_cost, -- затраты на топливо в рублях
+ total_income - (fuel.fuel_price * fuel.fuel_consumption) AS revenue -- выручка от рейса в рублях
+ 
+FROM Main_count
+JOIN fuel -- соединяем общ. таблицу (Main_count) с расчётом расхода топлива для каждого рейса по (flight_id)
+ ON Main_count.flight_id = fuel.flight_id
+
+ORDER BY flight_id 
